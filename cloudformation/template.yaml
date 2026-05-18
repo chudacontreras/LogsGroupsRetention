@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  LogsRetentionPeriodChange - Aplica retención a CloudWatch Log Groups que no
+  tienen política configurada. Compatible con StackSet (deploy en múltiples
+  cuentas/regiones) y con stack regular.
+
+Parameters:
+  RetentionInDays:
+    Type: Number
+    Default: 30
+    AllowedValues:
+      - 1
+      - 3
+      - 5
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 120
+      - 150
+      - 180
+      - 365
+      - 400
+      - 545
+      - 731
+      - 1827
+      - 2192
+      - 2557
+      - 2922
+      - 3288
+      - 3653
+    Description: Retención objetivo en días.
+  TargetRegions:
+    Type: CommaDelimitedList
+    Default: us-east-1
+    Description: >-
+      Lista de regiones que la Lambda escaneará en cada ejecución programada.
+      Si se despliega vía StackSet en cada región, se recomienda dejar solo la
+      región actual (AWS::Region).
+  ScheduleExpression:
+    Type: String
+    Default: rate(1 day)
+    Description: Expresión EventBridge para el sweep periódico.
+  EnableCreateLogGroupTrigger:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Si es true, crea una EventBridge rule que reacciona al CreateLogGroup
+      (vía CloudTrail) y dispara la Lambda inmediatamente.
+  DryRun:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Si es true, solo reporta sin aplicar cambios.
+  OverwriteExisting:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Si es true, también modifica log groups con retención distinta.
+  ExcludeLogGroupPrefixes:
+    Type: String
+    Default: ''
+    Description: Lista separada por comas de prefijos a excluir.
+  ProtectedLogGroupPatterns:
+    Type: String
+    Default: ''
+    Description: >-
+      Lista separada por comas de regex (case-insensitive) para log groups
+      adicionales que NUNCA deben ser modificados. Se concatena a la lista por
+      defecto que ya protege CloudTrail y AWS Config.
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+  FunctionTimeout:
+    Type: Number
+    Default: 300
+    MinValue: 30
+    MaxValue: 900
+  FunctionMemory:
+    Type: Number
+    Default: 256
+    AllowedValues: [128, 256, 512, 1024]
+  LambdaLogRetentionInDays:
+    Type: Number
+    Default: 30
+    Description: Retención del log group de esta misma Lambda.
+
+Conditions:
+  CreateEventBridgeOnCreate: !Equals [!Ref EnableCreateLogGroupTrigger, 'true']
+
+Resources:
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LogsRetentionEnforcer
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Mínimo privilegio: la Lambda solo necesita esto.
+              - Sid: DescribeLogGroups
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                Resource: '*'
+              - Sid: PutRetentionPolicy
+                Effect: Allow
+                Action:
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:*
+              - Sid: PublishMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: LogsRetentionEnforcer
+              # Logs propios de la Lambda
+              - Sid: OwnLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-fn:*
+
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-fn
+      RetentionInDays: !Ref LambdaLogRetentionInDays
+
+  Function:
+    Type: AWS::Serverless::Function
+    DependsOn: FunctionLogGroup
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-fn
+      CodeUri: ../src/
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.12
+      Timeout: !Ref FunctionTimeout
+      MemorySize: !Ref FunctionMemory
+      Role: !GetAtt FunctionRole.Arn
+      Environment:
+        Variables:
+          RETENTION_DAYS: !Ref RetentionInDays
+          TARGET_REGIONS: !Join [',', !Ref TargetRegions]
+          DRY_RUN: !Ref DryRun
+          OVERWRITE_EXISTING: !Ref OverwriteExisting
+          EXCLUDE_LOG_GROUP_PREFIXES: !Ref ExcludeLogGroupPrefixes
+          PROTECTED_LOG_GROUP_PATTERNS: !Ref ProtectedLogGroupPatterns
+          LOG_LEVEL: !Ref LogLevel
+          METRIC_NAMESPACE: LogsRetentionEnforcer
+
+  ScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${AWS::StackName}-schedule
+      Description: Sweep periódico de retención de log groups.
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: LogsRetentionFunction
+          Arn: !GetAtt Function.Arn
+
+  SchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduleRule.Arn
+
+  CreateLogGroupRule:
+    Type: AWS::Events::Rule
+    Condition: CreateEventBridgeOnCreate
+    Properties:
+      Name: !Sub ${AWS::StackName}-on-create
+      Description: Aplica retención cuando se crea un nuevo log group.
+      EventPattern:
+        source:
+          - aws.logs
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - logs.amazonaws.com
+          eventName:
+            - CreateLogGroup
+      State: ENABLED
+      Targets:
+        - Id: LogsRetentionFunction
+          Arn: !GetAtt Function.Arn
+
+  CreateLogGroupPermission:
+    Type: AWS::Lambda::Permission
+    Condition: CreateEventBridgeOnCreate
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CreateLogGroupRule.Arn
+
+Outputs:
+  FunctionArn:
+    Value: !GetAtt Function.Arn
+    Description: ARN de la Lambda.
+  FunctionRoleArn:
+    Value: !GetAtt FunctionRole.Arn
+  ScheduleRuleArn:
+    Value: !GetAtt ScheduleRule.Arn
+  CreateLogGroupRuleArn:
+    Condition: CreateEventBridgeOnCreate
+    Value: !GetAtt CreateLogGroupRule.Arn
