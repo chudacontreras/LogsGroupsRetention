@@ -7,7 +7,7 @@ variable "name" {
 variable "retention_in_days" {
   description = "Retención objetivo en días."
   type        = number
-  default     = 30
+  default     = 365
 
   validation {
     condition = contains(

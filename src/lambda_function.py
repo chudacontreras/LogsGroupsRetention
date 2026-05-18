@@ -57,7 +57,7 @@ VALID_RETENTION = {
     365, 400, 545, 731, 1827, 2192, 2557, 2922, 3288, 3653,
 }
 
-RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
+RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "365"))
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 OVERWRITE_EXISTING = os.environ.get("OVERWRITE_EXISTING", "false").strip().lower() == "true"
 DEFAULT_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
@@ -131,7 +131,8 @@ def _new_summary(region: str) -> Dict[str, Any]:
         "scanned": 0,
         "reported": [],
         "updated": [],
-        "alreadyCompliant": [],
+        "alreadyCompliant": [],            # retención == target
+        "existingRetentionPreserved": [],  # retención != target, NO se toca
         "skipped": [],
         "protected": [],
         "failed": [],
@@ -154,14 +155,29 @@ def _handle_group(client, lg: Dict[str, Any], region: str, summary: Dict[str, An
         summary["skipped"].append(name)
         return
 
-    needs_update = current is None or (OVERWRITE_EXISTING and current != RETENTION_DAYS)
-    if not needs_update:
+    # Política: solo aplicar retención a log groups SIN política (Never expire).
+    # Los que ya tienen una retención explícita se preservan tal cual, salvo
+    # que se active OVERWRITE_EXISTING para forzar el target.
+    if current is None:
+        action = "apply"
+    elif OVERWRITE_EXISTING and current != RETENTION_DAYS:
+        action = "overwrite"
+    elif current == RETENTION_DAYS:
         summary["alreadyCompliant"].append(name)
+        return
+    else:
+        LOGGER.info(
+            "[%s] preserving existing retention=%s days (target=%s) for %s",
+            region, current, RETENTION_DAYS, name,
+        )
+        summary["existingRetentionPreserved"].append(
+            {"name": name, "retention": current}
+        )
         return
 
     LOGGER.info(
-        "[%s] target=%s current=%s dry_run=%s name=%s",
-        region, RETENTION_DAYS, current, DRY_RUN, name,
+        "[%s] action=%s target=%s current=%s dry_run=%s name=%s",
+        region, action, RETENTION_DAYS, current, DRY_RUN, name,
     )
     if DRY_RUN:
         return
@@ -197,9 +213,11 @@ def _scan_region(region: str, context=None) -> Dict[str, Any]:
             break
     _emit_metrics(region, summary)
     LOGGER.info(
-        "[%s] done: scanned=%d updated=%d compliant=%d skipped=%d protected=%d failed=%d",
+        "[%s] done: scanned=%d updated=%d compliant=%d preserved=%d skipped=%d protected=%d failed=%d",
         region, summary["scanned"], len(summary["updated"]),
-        len(summary["alreadyCompliant"]), len(summary["skipped"]),
+        len(summary["alreadyCompliant"]),
+        len(summary["existingRetentionPreserved"]),
+        len(summary["skipped"]),
         len(summary["protected"]), len(summary["failed"]),
     )
     return summary
@@ -237,9 +255,11 @@ def _scan_page(region: str, next_token: str | None, context=None) -> Dict[str, A
 
     _emit_metrics(region, summary)
     LOGGER.info(
-        "[%s] page done: scanned=%d updated=%d compliant=%d skipped=%d protected=%d failed=%d done=%s",
+        "[%s] page done: scanned=%d updated=%d compliant=%d preserved=%d skipped=%d protected=%d failed=%d done=%s",
         region, summary["scanned"], len(summary["updated"]),
-        len(summary["alreadyCompliant"]), len(summary["skipped"]),
+        len(summary["alreadyCompliant"]),
+        len(summary["existingRetentionPreserved"]),
+        len(summary["skipped"]),
         len(summary["protected"]), len(summary["failed"]), done,
     )
     return {
@@ -283,6 +303,8 @@ def _emit_metrics(region: str, summary: Dict[str, Any]) -> None:
                 _metric("LogGroupsScanned", summary["scanned"], region),
                 _metric("LogGroupsUpdated", len(summary["updated"]), region),
                 _metric("LogGroupsCompliant", len(summary["alreadyCompliant"]), region),
+                _metric("LogGroupsExistingRetentionPreserved",
+                        len(summary["existingRetentionPreserved"]), region),
                 _metric("LogGroupsFailed", len(summary["failed"]), region),
                 _metric("LogGroupsSkipped", len(summary["skipped"]), region),
                 _metric("LogGroupsProtected", len(summary["protected"]), region),

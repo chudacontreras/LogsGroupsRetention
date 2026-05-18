@@ -8,7 +8,7 @@ Description: >-
 Parameters:
   RetentionInDays:
     Type: Number
-    Default: 30
+    Default: 365
     AllowedValues:
       - 1
       - 3

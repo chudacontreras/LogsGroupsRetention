@@ -47,14 +47,19 @@ EventBridge rule (CreateLogGroup) ──────► Lambda (procesa solo el 
    (visible en CloudWatch Logs y en la respuesta JSON).
 3. Si la retención es `None` (o distinta y `OverwriteExisting=true`), aplica
    la retención objetivo. En `DryRun=true` solo reporta.
+   - **Por defecto solo se tocan log groups con retención "Never expire"
+     (sin política).** Los que ya tienen un valor explícito (15, 30, 365…)
+     se preservan tal cual y aparecen en el contador `existingRetentionPreserved`.
+   - Para forzar el target sobre log groups que ya tienen retención usa
+     `OverwriteExisting=true`.
 4. **Nunca** modifica log groups de CloudTrail ni de AWS Config: están
    protegidos por defecto vía patrones regex (case-insensitive). Puedes añadir
    más patrones con `ProtectedLogGroupPatterns`, pero los defaults no se
    pueden desactivar.
 5. Publica métricas en el namespace `LogsRetentionEnforcer`:
    `LogGroupsScanned`, `LogGroupsUpdated`, `LogGroupsCompliant`,
-   `LogGroupsFailed`, `LogGroupsSkipped`, `LogGroupsProtected`,
-   dimensionadas por `Region`.
+   `LogGroupsExistingRetentionPreserved`, `LogGroupsFailed`, `LogGroupsSkipped`,
+   `LogGroupsProtected`, dimensionadas por `Region`.
 
 ### Triggers
 - **EventBridge schedule → Step Functions** (recomendado): orquesta el sweep
@@ -72,7 +77,7 @@ EventBridge rule (CreateLogGroup) ──────► Lambda (procesa solo el 
 
 | Parámetro | Default | Descripción |
 |---|---|---|
-| `RetentionInDays` / `retention_in_days` | 30 | Valor permitido por CloudWatch Logs |
+| `RetentionInDays` / `retention_in_days` | 365 | Valor permitido por CloudWatch Logs (default 1 año) |
 | `TargetRegions` / `target_regions` | región actual | Regiones a recorrer en el sweep |
 | `ScheduleExpression` / `schedule_expression` | `rate(1 day)` | Frecuencia del sweep |
 | `EnableCreateLogGroupTrigger` / `enable_create_log_group_trigger` | true | Habilita el trigger en `CreateLogGroup` |
@@ -102,7 +107,7 @@ sam deploy \
   --capabilities CAPABILITY_IAM \
   --resolve-s3 \
   --parameter-overrides \
-    RetentionInDays=30 \
+    RetentionInDays=365 \
     TargetRegions=us-east-1 \
     ScheduleExpression="rate(1 day)" \
     EnableCreateLogGroupTrigger=true
@@ -121,7 +126,7 @@ aws cloudformation create-stack-set \
   --permission-model SERVICE_MANAGED \
   --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false \
   --parameters \
-      ParameterKey=RetentionInDays,ParameterValue=30 \
+      ParameterKey=RetentionInDays,ParameterValue=365 \
       ParameterKey=TargetRegions,ParameterValue=${AWS::Region} \
       ParameterKey=EnableCreateLogGroupTrigger,ParameterValue=true
 

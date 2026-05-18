@@ -1,5 +1,5 @@
 name                            = "logs-retention-enforcer"
-retention_in_days               = 30
+retention_in_days               = 365
 target_regions                  = ["us-east-1"]
 schedule_expression             = "rate(1 day)"
 enable_create_log_group_trigger = true
