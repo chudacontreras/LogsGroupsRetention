@@ -5,11 +5,17 @@ LogsRetentionPeriodChange
 Lambda que aplica una política de retención de CloudWatch Logs sobre log groups.
 
 Triggers soportados:
-  1. EventBridge schedule (sweep periódico).
+  1. Step Functions (sweep periódico, soporta cuentas grandes >15 min).
+     La state machine invoca la Lambda en modo `scanPage` con un `nextToken`
+     hasta que la región queda procesada.
   2. EventBridge rule sobre el evento CloudTrail `CreateLogGroup`
      (aplicación inmediata cuando se crea un log group nuevo).
   3. Invocación manual: el evento puede traer
-     `{"regions": ["us-east-1", ...], "dryRun": true}` para overrides puntuales.
+     `{"regions": ["us-east-1", ...], "dryRun": true}` para overrides puntuales
+     (limitado a 15 min por invocación).
+  4. Modo paginado: `{"action": "scanPage", "region": "us-east-1",
+     "nextToken": "<opcional>"}` -> el handler procesa páginas hasta acercarse
+     al timeout y devuelve `{region, nextToken, done, summary}`.
 
 Variables de entorno:
   RETENTION_DAYS              Retención objetivo (por defecto 30). Debe ser un
@@ -90,6 +96,10 @@ PROTECTED_PATTERNS: List[Pattern[str]] = [
 ]
 METRIC_NAMESPACE = os.environ.get("METRIC_NAMESPACE", "LogsRetentionEnforcer")
 
+# Margen de seguridad respecto al timeout de la Lambda para cortar el escaneo
+# antes de que AWS lo termine abruptamente.
+SAFETY_MARGIN_MS = int(os.environ.get("SAFETY_MARGIN_MS", "20000"))
+
 if RETENTION_DAYS not in VALID_RETENTION:
     raise ValueError(
         f"RETENTION_DAYS={RETENTION_DAYS} no es válido. "
@@ -165,7 +175,12 @@ def _handle_group(client, lg: Dict[str, Any], region: str, summary: Dict[str, An
         summary["failed"].append({"name": name, "error": str(exc)})
 
 
-def _scan_region(region: str) -> Dict[str, Any]:
+def _scan_region(region: str, context=None) -> Dict[str, Any]:
+    """Modo legacy: recorre toda la región en una sola invocación.
+
+    Útil para invocaciones manuales en cuentas pequeñas. Para cuentas grandes
+    usar `_scan_page` orquestado por Step Functions.
+    """
     LOGGER.info("Scanning region %s", region)
     client = _logs(region)
     summary = _new_summary(region)
@@ -173,6 +188,13 @@ def _scan_region(region: str) -> Dict[str, Any]:
     for page in paginator.paginate():
         for lg in page.get("logGroups", []):
             _handle_group(client, lg, region, summary)
+        if _should_stop(context):
+            LOGGER.warning(
+                "[%s] aborting full scan, approaching timeout. Use Step "
+                "Functions for large accounts.",
+                region,
+            )
+            break
     _emit_metrics(region, summary)
     LOGGER.info(
         "[%s] done: scanned=%d updated=%d compliant=%d skipped=%d protected=%d failed=%d",
@@ -181,6 +203,60 @@ def _scan_region(region: str) -> Dict[str, Any]:
         len(summary["protected"]), len(summary["failed"]),
     )
     return summary
+
+
+def _scan_page(region: str, next_token: str | None, context=None) -> Dict[str, Any]:
+    """Procesa páginas de log groups hasta acercarse al timeout.
+
+    Devuelve `done=True` cuando ya no hay más `nextToken`. Si todavía queda
+    trabajo, devuelve el siguiente token para que la state machine continúe.
+    """
+    LOGGER.info("Scanning page region=%s tokenPresent=%s", region, bool(next_token))
+    client = _logs(region)
+    summary = _new_summary(region)
+
+    kwargs: Dict[str, Any] = {"limit": 50}
+    if next_token:
+        kwargs["nextToken"] = next_token
+
+    last_token: str | None = None
+    done = False
+    while True:
+        resp = client.describe_log_groups(**kwargs)
+        for lg in resp.get("logGroups", []):
+            _handle_group(client, lg, region, summary)
+
+        last_token = resp.get("nextToken")
+        if not last_token:
+            done = True
+            break
+        kwargs["nextToken"] = last_token
+        if _should_stop(context):
+            LOGGER.info("[%s] yielding to next step, token preserved", region)
+            break
+
+    _emit_metrics(region, summary)
+    LOGGER.info(
+        "[%s] page done: scanned=%d updated=%d compliant=%d skipped=%d protected=%d failed=%d done=%s",
+        region, summary["scanned"], len(summary["updated"]),
+        len(summary["alreadyCompliant"]), len(summary["skipped"]),
+        len(summary["protected"]), len(summary["failed"]), done,
+    )
+    return {
+        "region": region,
+        "done": done,
+        "nextToken": last_token if not done else None,
+        "summary": summary,
+    }
+
+
+def _should_stop(context) -> bool:
+    if context is None or not hasattr(context, "get_remaining_time_in_millis"):
+        return False
+    try:
+        return context.get_remaining_time_in_millis() < SAFETY_MARGIN_MS
+    except Exception:  # pragma: no cover - defensive
+        return False
 
 
 def _process_single(region: str, log_group_name: str) -> Dict[str, Any]:
@@ -229,6 +305,11 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
     LOGGER.info("Event: %s", json.dumps(event) if event else "{}")
     event = event or {}
 
+    # Modo paginado (orquestado por Step Functions o invocaciones encadenadas)
+    if event.get("action") == "scanPage":
+        region = event.get("region") or DEFAULT_REGION
+        return _scan_page(region, event.get("nextToken"), context)
+
     # Trigger: CreateLogGroup vía CloudTrail
     if event.get("detail-type") == "AWS API Call via CloudTrail":
         detail = event.get("detail", {}) or {}
@@ -240,9 +321,9 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
                 return _response([], event)
             return _response([_process_single(region, lg_name)], event)
 
-    # Trigger: schedule o invocación manual
+    # Modo legacy: invocación manual o schedule sin Step Functions
     regions: List[str] = event.get("regions") or TARGET_REGIONS
-    summaries = [_scan_region(r) for r in regions]
+    summaries = [_scan_region(r, context) for r in regions]
     return _response(summaries, event)
 
 

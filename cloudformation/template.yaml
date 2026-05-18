@@ -167,20 +167,161 @@ Resources:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub ${AWS::StackName}-schedule
-      Description: Sweep periódico de retención de log groups.
+      Description: Sweep periódico de retención de log groups (vía Step Functions).
       ScheduleExpression: !Ref ScheduleExpression
       State: ENABLED
       Targets:
-        - Id: LogsRetentionFunction
-          Arn: !GetAtt Function.Arn
+        - Id: LogsRetentionStateMachine
+          Arn: !GetAtt StateMachine.Arn
+          RoleArn: !GetAtt EventsToStepFunctionsRole.Arn
+          Input: !Sub
+            - '{"regionsCsv": "${Csv}"}'
+            - Csv: !Join [',', !Ref TargetRegions]
 
-  SchedulePermission:
-    Type: AWS::Lambda::Permission
+  EventsToStepFunctionsRole:
+    Type: AWS::IAM::Role
     Properties:
-      FunctionName: !Ref Function
-      Action: lambda:InvokeFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt ScheduleRule.Arn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartStateMachine
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !GetAtt StateMachine.Arn
+
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeFunction
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt Function.Arn
+                  - !Sub ${Function.Arn}:*
+        - PolicyName: StepFunctionsLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # AWS exige estos permisos sobre "*" para CloudWatch Logs en
+              # Step Functions. La política se aplica solo a este rol.
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/states/${AWS::StackName}-sm
+      RetentionInDays: !Ref LambdaLogRetentionInDays
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub ${AWS::StackName}-sm
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StateMachineRole.Arn
+      LoggingConfiguration:
+        Level: ERROR
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      DefinitionSubstitutions:
+        FunctionArn: !GetAtt Function.Arn
+      DefinitionString: |
+        {
+          "Comment": "Sweep paginado y resiliente >15min",
+          "StartAt": "ParseInput",
+          "States": {
+            "ParseInput": {
+              "Type": "Pass",
+              "Parameters": {
+                "regions.$": "States.StringSplit($.regionsCsv, ',')"
+              },
+              "Next": "FanOutByRegion"
+            },
+            "FanOutByRegion": {
+              "Type": "Map",
+              "ItemsPath": "$.regions",
+              "MaxConcurrency": 5,
+              "ItemSelector": {
+                "region.$": "$$.Map.Item.Value",
+                "action": "scanPage"
+              },
+              "ItemProcessor": {
+                "ProcessorConfig": { "Mode": "INLINE" },
+                "StartAt": "ScanPage",
+                "States": {
+                  "ScanPage": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${FunctionArn}",
+                      "Payload.$": "$"
+                    },
+                    "OutputPath": "$.Payload",
+                    "Retry": [
+                      {
+                        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "States.TaskFailed"],
+                        "IntervalSeconds": 5,
+                        "BackoffRate": 2,
+                        "MaxAttempts": 5
+                      }
+                    ],
+                    "Next": "More?"
+                  },
+                  "More?": {
+                    "Type": "Choice",
+                    "Choices": [
+                      { "Variable": "$.done", "BooleanEquals": false, "Next": "PrepareNextPage" }
+                    ],
+                    "Default": "RegionDone"
+                  },
+                  "PrepareNextPage": {
+                    "Type": "Pass",
+                    "Parameters": {
+                      "action": "scanPage",
+                      "region.$": "$.region",
+                      "nextToken.$": "$.nextToken"
+                    },
+                    "Next": "ScanPage"
+                  },
+                  "RegionDone": {
+                    "Type": "Succeed"
+                  }
+                }
+              },
+              "End": true
+            }
+          }
+        }
 
   CreateLogGroupRule:
     Type: AWS::Events::Rule
@@ -218,6 +359,9 @@ Outputs:
     Description: ARN de la Lambda.
   FunctionRoleArn:
     Value: !GetAtt FunctionRole.Arn
+  StateMachineArn:
+    Value: !GetAtt StateMachine.Arn
+    Description: ARN de la State Machine que orquesta el sweep.
   ScheduleRuleArn:
     Value: !GetAtt ScheduleRule.Arn
   CreateLogGroupRuleArn:

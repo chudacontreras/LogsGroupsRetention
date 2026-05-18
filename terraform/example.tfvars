@@ -8,7 +8,7 @@ overwrite_existing              = false
 exclude_log_group_prefixes      = ["/aws/audit/"]
 # CloudTrail y Config quedan protegidos por defecto. Aquí solo agregas extras.
 protected_log_group_patterns = []
-log_level                       = "INFO"
+log_level                    = "INFO"
 tags = {
   Project = "LogsRetentionEnforcer"
   Owner   = "platform"

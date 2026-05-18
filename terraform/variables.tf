@@ -60,8 +60,8 @@ Regex (case-insensitive) de log groups adicionales que NUNCA deben ser
 modificados. Se concatena a la lista por defecto que ya protege CloudTrail y
 AWS Config.
 EOT
-  type    = list(string)
-  default = []
+  type        = list(string)
+  default     = []
 }
 
 variable "log_level" {

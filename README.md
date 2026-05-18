@@ -9,10 +9,36 @@ y registra métricas de la operación.
 ```
 .
 ├── src/lambda_function.py        # Código de la Lambda
-├── cloudformation/template.yaml  # Plantilla SAM/CFN (compatible con StackSet)
+├── cloudformation/template.yaml  # Plantilla SAM/CFN (Lambda + Step Functions)
 ├── terraform/                    # Despliegue equivalente con Terraform
 └── README.md
 ```
+
+## Arquitectura
+
+```
+EventBridge (schedule)
+        │
+        ▼
+   Step Functions (Standard, hasta 1 año)
+        │
+   ┌────┴────┐ Map por región (concurrencia 5)
+   ▼         ▼
+ScanPage → ScanPage → ... (loop hasta done=true)
+        │
+        ▼
+      Lambda (action=scanPage, max ~14 min por página)
+
+EventBridge rule (CreateLogGroup) ──────► Lambda (procesa solo el nuevo)
+```
+
+- **Sweep periódico**: el schedule arranca la **State Machine**, no la Lambda.
+  La state machine pagina por región y reinvoca la Lambda hasta terminar, así
+  el escaneo total puede durar lo que haga falta (Standard SFN ≤ 1 año por
+  ejecución).
+- **CreateLogGroup**: sigue siendo Lambda directa, una invocación por evento.
+- **Cada invocación de la Lambda** procesa páginas hasta acercarse al timeout
+  (`SAFETY_MARGIN_MS`, default 20 s) y devuelve `nextToken` si queda trabajo.
 
 ## Comportamiento
 
@@ -31,11 +57,16 @@ y registra métricas de la operación.
    dimensionadas por `Region`.
 
 ### Triggers
-- **EventBridge schedule** (cron/rate) configurable.
-- **EventBridge rule** sobre `CreateLogGroup` vía CloudTrail: en cuanto se crea
-  un log group nuevo, la Lambda recibe el evento y aplica la retención al
-  recién creado (sin recorrer todo).
-- **Invocación manual**: `{"regions": ["us-east-1"], "dryRun": true}`.
+- **EventBridge schedule → Step Functions** (recomendado): orquesta el sweep
+  paginado y soporta cuentas grandes con tiempo total >15 minutos.
+- **EventBridge rule → Lambda** sobre `CreateLogGroup` vía CloudTrail: en
+  cuanto se crea un log group nuevo, la Lambda recibe el evento y aplica la
+  retención al recién creado.
+- **Invocación manual a la Lambda**: `{"regions": ["us-east-1"], "dryRun": true}`
+  (un solo `RunTime`, limitado a 15 min).
+- **Modo paginado a la Lambda**:
+  `{"action": "scanPage", "region": "us-east-1", "nextToken": "..."}` →
+  útil si quieres orquestar tú mismo el loop.
 
 ## Parámetros
 

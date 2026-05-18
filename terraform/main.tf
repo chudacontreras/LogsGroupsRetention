@@ -95,14 +95,14 @@ resource "aws_lambda_function" "this" {
 
   environment {
     variables = {
-      RETENTION_DAYS             = tostring(var.retention_in_days)
-      TARGET_REGIONS             = join(",", var.target_regions)
-      DRY_RUN                    = tostring(var.dry_run)
-      OVERWRITE_EXISTING         = tostring(var.overwrite_existing)
+      RETENTION_DAYS               = tostring(var.retention_in_days)
+      TARGET_REGIONS               = join(",", var.target_regions)
+      DRY_RUN                      = tostring(var.dry_run)
+      OVERWRITE_EXISTING           = tostring(var.overwrite_existing)
       EXCLUDE_LOG_GROUP_PREFIXES   = join(",", var.exclude_log_group_prefixes)
       PROTECTED_LOG_GROUP_PATTERNS = join(",", var.protected_log_group_patterns)
-      LOG_LEVEL                  = var.log_level
-      METRIC_NAMESPACE           = local.metric_ns
+      LOG_LEVEL                    = var.log_level
+      METRIC_NAMESPACE             = local.metric_ns
     }
   }
 
@@ -111,26 +111,25 @@ resource "aws_lambda_function" "this" {
 }
 
 # --------------------------- EventBridge: schedule ----------------------------
+# El schedule arranca la State Machine (no la Lambda directamente) para
+# soportar cuentas grandes con tiempos de ejecución >15 minutos.
 
 resource "aws_cloudwatch_event_rule" "schedule" {
   name                = "${var.name}-schedule"
-  description         = "Sweep periódico de retención de log groups."
+  description         = "Sweep periódico de retención de log groups (Step Functions)."
   schedule_expression = var.schedule_expression
   tags                = var.tags
 }
 
 resource "aws_cloudwatch_event_target" "schedule" {
   rule      = aws_cloudwatch_event_rule.schedule.name
-  target_id = "LogsRetentionFunction"
-  arn       = aws_lambda_function.this.arn
-}
+  target_id = "LogsRetentionStateMachine"
+  arn       = aws_sfn_state_machine.this.arn
+  role_arn  = aws_iam_role.events_to_sfn.arn
 
-resource "aws_lambda_permission" "schedule" {
-  statement_id  = "AllowSchedule"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.this.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.schedule.arn
+  input = jsonencode({
+    regionsCsv = join(",", var.target_regions)
+  })
 }
 
 # ---------------------- EventBridge: CreateLogGroup ---------------------------
