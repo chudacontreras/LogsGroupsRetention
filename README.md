@@ -108,7 +108,7 @@ sam deploy \
   --parameter-overrides \
     RetentionInDays=365 \
     TargetRegions=us-east-1,us-east-2,us-west-2,ca-central-1 \
-    ScheduleExpression="rate(1 day)" \
+    'ScheduleExpression=rate(1 day)' \
     EnableCreateLogGroupTrigger=true
 ```
 
