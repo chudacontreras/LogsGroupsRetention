@@ -21,7 +21,7 @@ variable "retention_in_days" {
 variable "target_regions" {
   description = "Regiones que la Lambda revisará en el sweep periódico."
   type        = list(string)
-  default     = ["us-east-1"]
+  default     = ["us-east-1", "us-east-2", "us-west-2", "ca-central-1"]
 }
 
 variable "schedule_expression" {

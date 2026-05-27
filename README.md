@@ -78,7 +78,7 @@ EventBridge rule (CreateLogGroup) ──────► Lambda (procesa solo el 
 | Parámetro | Default | Descripción |
 |---|---|---|
 | `RetentionInDays` / `retention_in_days` | 365 | Valor permitido por CloudWatch Logs (default 1 año) |
-| `TargetRegions` / `target_regions` | región actual | Regiones a recorrer en el sweep |
+| `TargetRegions` / `target_regions` | us-east-1, us-east-2, us-west-2, ca-central-1 | Regiones a recorrer en el sweep |
 | `ScheduleExpression` / `schedule_expression` | `rate(1 day)` | Frecuencia del sweep |
 | `EnableCreateLogGroupTrigger` / `enable_create_log_group_trigger` | true | Habilita el trigger en `CreateLogGroup` |
 | `DryRun` / `dry_run` | false | Solo reporta sin aplicar |
@@ -108,7 +108,7 @@ sam deploy \
   --resolve-s3 \
   --parameter-overrides \
     RetentionInDays=365 \
-    TargetRegions=us-east-1 \
+    TargetRegions=us-east-1,us-east-2,us-west-2,ca-central-1 \
     ScheduleExpression="rate(1 day)" \
     EnableCreateLogGroupTrigger=true
 ```

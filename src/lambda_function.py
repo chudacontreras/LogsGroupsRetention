@@ -63,7 +63,7 @@ OVERWRITE_EXISTING = os.environ.get("OVERWRITE_EXISTING", "false").strip().lower
 DEFAULT_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 TARGET_REGIONS = [
     r.strip()
-    for r in os.environ.get("TARGET_REGIONS", DEFAULT_REGION).split(",")
+    for r in os.environ.get("TARGET_REGIONS", "us-east-1,us-east-2,us-west-2,ca-central-1").split(",")
     if r.strip()
 ]
 EXCLUDE_PREFIXES = [
