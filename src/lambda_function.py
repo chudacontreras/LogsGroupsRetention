@@ -155,24 +155,18 @@ def _handle_group(client, lg: Dict[str, Any], region: str, summary: Dict[str, An
         summary["skipped"].append(name)
         return
 
-    # Política: solo aplicar retención a log groups SIN política (Never expire).
-    # Los que ya tienen una retención explícita se preservan tal cual, salvo
-    # que se active OVERWRITE_EXISTING para forzar el target.
+    # Política: aplicar retención a TODOS los log groups que no estén en 365.
+    # - Sin retención (Never expire) → aplicar target.
+    # - Retención != target (menor o mayor) → cambiar al target.
+    # - Retención == target → ya compliant.
+    # OVERWRITE_EXISTING no es necesario para este comportamiento; la lógica
+    # lo hace por defecto.
     if current is None:
         action = "apply"
-    elif OVERWRITE_EXISTING and current != RETENTION_DAYS:
-        action = "overwrite"
-    elif current == RETENTION_DAYS:
-        summary["alreadyCompliant"].append(name)
-        return
+    elif current != RETENTION_DAYS:
+        action = "normalize"
     else:
-        LOGGER.info(
-            "[%s] preserving existing retention=%s days (target=%s) for %s",
-            region, current, RETENTION_DAYS, name,
-        )
-        summary["existingRetentionPreserved"].append(
-            {"name": name, "retention": current}
-        )
+        summary["alreadyCompliant"].append(name)
         return
 
     LOGGER.info(

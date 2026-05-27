@@ -45,13 +45,12 @@ EventBridge rule (CreateLogGroup) ──────► Lambda (procesa solo el 
 1. Lista todos los log groups de las regiones objetivo (paginado).
 2. **Reporta** cada log group con su retención actual antes de tocar nada
    (visible en CloudWatch Logs y en la respuesta JSON).
-3. Si la retención es `None` (o distinta y `OverwriteExisting=true`), aplica
-   la retención objetivo. En `DryRun=true` solo reporta.
-   - **Por defecto solo se tocan log groups con retención "Never expire"
-     (sin política).** Los que ya tienen un valor explícito (15, 30, 365…)
-     se preservan tal cual y aparecen en el contador `existingRetentionPreserved`.
-   - Para forzar el target sobre log groups que ya tienen retención usa
-     `OverwriteExisting=true`.
+3. Si la retención es `None` **o distinta a 365 días** (menor o mayor),
+   aplica la retención objetivo (365 días). En `DryRun=true` solo reporta.
+   - **Se tocan**: log groups sin retención (Never expire) y los que tengan
+     cualquier retención distinta al target (7, 14, 30, 731, 1827…).
+   - **Solo se preservan**: log groups que ya están en 365 (`alreadyCompliant`)
+     y los protegidos (CloudTrail / Config).
 4. **Nunca** modifica log groups de CloudTrail ni de AWS Config: están
    protegidos por defecto vía patrones regex (case-insensitive). Puedes añadir
    más patrones con `ProtectedLogGroupPatterns`, pero los defaults no se
